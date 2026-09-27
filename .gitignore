@@ -1,0 +1,29 @@
+# Local API test collections (Insomnia)
+insomnia/
+
+# Build output
+build/
+out/
+bin/
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.classpath
+.project
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and local environment / secrets
+*.log
+logs/
+.env
+.env.*

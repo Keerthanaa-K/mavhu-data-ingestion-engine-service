@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: ${STAGING_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/mavhu_staging_db}}
+    username: ${STAGING_DB_USERNAME:${DB_USERNAME:postgres}}
+    password: ${STAGING_DB_PASSWORD:${DB_PASSWORD:postgres}}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  cloud:
+    aws:
+      region:
+        static: ${STAGING_AWS_REGION:${AWS_REGION:ap-south-1}}
+      credentials:
+        access-key: ${STAGING_AWS_ACCESS_KEY_ID:${AWS_ACCESS_KEY_ID:}}
+        secret-key: ${STAGING_AWS_SECRET_ACCESS_KEY:${AWS_SECRET_ACCESS_KEY:}}
+
+server:
+  port: ${STAGING_SERVER_PORT:${SERVER_PORT:8080}}

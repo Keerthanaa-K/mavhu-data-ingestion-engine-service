@@ -1,0 +1,24 @@
+app:
+  datasource:
+    initialize-database: true
+
+spring:
+  datasource:
+    url: ${LOCAL_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/mavhu_db}}
+    username: ${LOCAL_DB_USERNAME:${DB_USERNAME:mavhu_ingestion_service}}
+    password: ${LOCAL_DB_PASSWORD:${DB_PASSWORD:MAvHU_ingestion}}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+  cloud:
+    aws:
+      region:
+        static: ${LOCAL_AWS_REGION:${AWS_REGION:af-south-1}}
+      credentials:
+        access-key: ${LOCAL_AWS_ACCESS_KEY_ID:${AWS_ACCESS_KEY_ID:}}
+        secret-key: ${LOCAL_AWS_SECRET_ACCESS_KEY:${AWS_SECRET_ACCESS_KEY:}}
+
+server:
+  port: ${LOCAL_SERVER_PORT:${SERVER_PORT:8080}}

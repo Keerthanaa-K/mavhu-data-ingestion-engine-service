@@ -1,0 +1,20 @@
+spring:
+  datasource:
+    url: ${PROD_DB_URL:${DB_URL:jdbc:postgresql://localhost:5432/mavhu_prod_db}}
+    username: ${PROD_DB_USERNAME:${DB_USERNAME:postgres}}
+    password: ${PROD_DB_PASSWORD:${DB_PASSWORD:postgres}}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+  cloud:
+    aws:
+      region:
+        static: ${PROD_AWS_REGION:${AWS_REGION:ap-south-1}}
+      credentials:
+        access-key: ${PROD_AWS_ACCESS_KEY_ID:${AWS_ACCESS_KEY_ID:}}
+        secret-key: ${PROD_AWS_SECRET_ACCESS_KEY:${AWS_SECRET_ACCESS_KEY:}}
+
+server:
+  port: ${PROD_SERVER_PORT:${SERVER_PORT:8080}}

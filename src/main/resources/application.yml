@@ -1,0 +1,47 @@
+spring:
+  application:
+    name: mavhu-data-ingestion-engine-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/mavhu_db}
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+  servlet:
+    multipart:
+      max-file-size: ${MAX_FILE_SIZE:50MB}
+      max-request-size: ${MAX_REQUEST_SIZE:50MB}
+  cloud:
+    aws:
+      region:
+        static: ${AWS_REGION:af-south-1}
+        auto: false
+      credentials:
+        use-default-aws-credentials-chain: true
+        instance-profile: false
+      sqs:
+        enabled: true
+      s3:
+        enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+app:
+  s3:
+    bucket: ${S3_BUCKET:mavhu-data-ingestion-engine-service}
+  processor:
+    # Where the upload flow sends process requests; empty = this instance.
+    base-url: ${FILE_PROCESSOR_BASE_URL:}
