@@ -328,6 +328,49 @@ class FileIngestionEndToEndTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
     }
 
+    // --- CORS --------------------------------------------------------------------------------------
+
+    @Test
+    void corsPreflightAllowsConfiguredFrontendOrigin() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setOrigin("http://localhost:5173");
+        headers.setAccessControlRequestMethod(org.springframework.http.HttpMethod.POST);
+        headers.setAccessControlRequestHeaders(java.util.List.of("content-type"));
+
+        ResponseEntity<String> preflight = restTemplate.exchange("/ingestion/v1/customers/{c}/files",
+                org.springframework.http.HttpMethod.OPTIONS, new HttpEntity<>(headers), String.class, ids.customerId());
+
+        assertThat(preflight.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(preflight.getHeaders().getAccessControlAllowOrigin()).isEqualTo("http://localhost:5173");
+        assertThat(preflight.getHeaders().getAccessControlAllowMethods())
+                .contains(org.springframework.http.HttpMethod.POST);
+    }
+
+    @Test
+    void corsAllowsActualRequestFromConfiguredOrigin() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setOrigin("http://localhost:3000");
+
+        ResponseEntity<String> response = restTemplate.exchange("/ingestion/v1/files/types",
+                org.springframework.http.HttpMethod.GET, new HttpEntity<>(headers), String.class);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getHeaders().getAccessControlAllowOrigin()).isEqualTo("http://localhost:3000");
+    }
+
+    @Test
+    void corsRejectsUnknownOrigin() {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setOrigin("http://evil.example");
+        headers.setAccessControlRequestMethod(org.springframework.http.HttpMethod.POST);
+
+        ResponseEntity<String> preflight = restTemplate.exchange("/ingestion/v1/customers/{c}/files",
+                org.springframework.http.HttpMethod.OPTIONS, new HttpEntity<>(headers), String.class, ids.customerId());
+
+        assertThat(preflight.getStatusCode()).isEqualTo(HttpStatus.FORBIDDEN);
+        assertThat(preflight.getHeaders().getAccessControlAllowOrigin()).isNull();
+    }
+
     private ResponseEntity<Map> review(String fileId, String action, Integer managerUserId, String comment) {
         Map<String, Object> request = new java.util.HashMap<>();
         request.put("managerUserId", managerUserId);
