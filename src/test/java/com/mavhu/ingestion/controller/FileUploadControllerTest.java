@@ -213,6 +213,39 @@ class FileUploadControllerTest {
         verifyNoInteractions(fileRegistrationService, fileProcessorClient);
     }
 
+    @Test
+    void rejectsBatchLargerThanTheLimitWithoutStoringAnything() throws Exception {
+        var request = multipart("/ingestion/v1/customers/{customerId}/files/batch", 42);
+        for (int i = 0; i < 21; i++) {
+            request.file(new MockMultipartFile("files", "f" + i + ".xlsx", XLSX_CONTENT_TYPE, new byte[]{1}));
+        }
+
+        mockMvc.perform(request.param("userId", "3").param("fileType", "SCOPE_1_DIRECT"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("Too many files: 21 (at most 20 per batch)"));
+
+        verifyNoInteractions(s3Template, fileRegistrationService, fileProcessorClient);
+    }
+
+    @Test
+    void rejectsBatchWithoutFiles() throws Exception {
+        mockMvc.perform(multipart("/ingestion/v1/customers/{customerId}/files/batch", 42)
+                        .param("userId", "3").param("fileType", "SCOPE_1_DIRECT"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(s3Template, fileRegistrationService, fileProcessorClient);
+    }
+
+    @Test
+    void rejectsBatchFromUserOfAnotherCustomer() throws Exception {
+        mockMvc.perform(multipart("/ingestion/v1/customers/{customerId}/files/batch", 42)
+                        .file(new MockMultipartFile("files", DATASET, XLSX_CONTENT_TYPE, datasetBytes()))
+                        .param("userId", "9").param("fileType", "SCOPE_1_DIRECT"))
+                .andExpect(status().isForbidden());
+
+        verifyNoInteractions(s3Template, fileRegistrationService, fileProcessorClient);
+    }
+
     private static byte[] datasetBytes() throws Exception {
         try (InputStream in = new ClassPathResource(DATASET).getInputStream()) {
             return in.readAllBytes();

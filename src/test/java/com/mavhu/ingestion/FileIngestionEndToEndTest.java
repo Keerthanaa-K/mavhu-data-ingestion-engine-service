@@ -202,6 +202,113 @@ class FileIngestionEndToEndTest {
                         job -> job != null && ("COMPLETED".equals(job.get("status")) || "FAILED".equals(job.get("status"))));
     }
 
+    // --- batch upload -------------------------------------------------------------------------
+
+    private static final Map<String, Integer> SCOPE1_BATCH = Map.of(
+            "scope1/Scope_1_Fleet_Fuel_2026-09.xlsx", 4,
+            "scope1/Scope_1_Generators_2026-09.xlsx", 3,
+            "scope1/Scope_1_Refrigerants_2026-09.xlsx", 2);
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void batchOfSameTypeFilesIsProcessedFilePerFile() {
+        java.util.List<String> names = SCOPE1_BATCH.keySet().stream().sorted().toList();
+
+        ResponseEntity<Map> response = uploadBatch("SCOPE_1_DIRECT", names.toArray(String[]::new));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(response.getBody()).containsEntry("fileType", "SCOPE_1_DIRECT").containsEntry("fileCount", 3);
+        java.util.List<Map<String, Object>> files = (java.util.List<Map<String, Object>>) response.getBody().get("files");
+        assertThat(files).extracting(f -> f.get("originalFileName"))
+                .containsExactlyElementsOf(names.stream().map(n -> n.substring(n.indexOf('/') + 1)).toList());
+        assertThat(files).extracting(f -> f.get("fileId")).doesNotHaveDuplicates();
+        assertThat(files).extracting(f -> f.get("jobId")).doesNotHaveDuplicates();
+        assertThat(files).allSatisfy(f -> assertThat(f).containsEntry("approvalStatus", "PENDING")
+                .containsEntry("uploadedByUserId", ids.uploaderId()));
+
+        for (int i = 0; i < names.size(); i++) {
+            String jobId = (String) files.get(i).get("jobId");
+            int expectedRows = SCOPE1_BATCH.get(names.get(i));
+            Map<String, Object> job = awaitFinished(jobId);
+            assertThat(job.get("status")).as("%s: %s", names.get(i), job.get("errorMessage")).isEqualTo("COMPLETED");
+            assertThat(job.get("rowsIngested")).isEqualTo(expectedRows);
+            assertThat(rowsForJob("esg_scope1_direct_emissions", jobId)).isEqualTo(expectedRows);
+        }
+
+        Map<String, Object> refrigerant = jdbcTemplate.queryForMap(
+                "SELECT * FROM mavhu.esg_scope1_direct_emissions WHERE ingestion_job_id = ? AND record_id = 'S1-302'",
+                UUID.fromString((String) files.get(names.indexOf("scope1/Scope_1_Refrigerants_2026-09.xlsx")).get("jobId")));
+        assertThat(refrigerant.get("FUEL_OR_REFRIGERANT_TYPE")).isEqualTo("R134a");
+        assertThat((BigDecimal) refrigerant.get("EMISSIONS_KGCO2E")).isEqualByComparingTo("4433");
+        assertThat((BigDecimal) refrigerant.get("EMISSIONS_TCO2E")).isEqualByComparingTo("4.433");
+
+        // Each file of the batch is reviewed on its own.
+        String firstFileId = (String) files.getFirst().get("fileId");
+        assertThat(review(firstFileId, "approve", ids.managerId(), null).getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(fileIds("APPROVED")).contains(firstFileId);
+        assertThat(fileIds("PENDING")).contains((String) files.get(1).get("fileId"), (String) files.get(2).get("fileId"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fileOfTheWrongTypeInABatchFailsOnItsOwn() {
+        ResponseEntity<Map> response = uploadBatch("SCOPE_1_DIRECT",
+                "scope1/Scope_1_Generators_2026-09.xlsx", "04_Scope_2_Energy.xlsx");
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        java.util.List<Map<String, Object>> files = (java.util.List<Map<String, Object>>) response.getBody().get("files");
+        Map<String, Object> good = awaitFinished((String) files.get(0).get("jobId"));
+        Map<String, Object> wrong = awaitFinished((String) files.get(1).get("jobId"));
+
+        assertThat(good.get("status")).isEqualTo("COMPLETED");
+        assertThat(good.get("rowsIngested")).isEqualTo(3);
+        assertThat(wrong.get("status")).isEqualTo("FAILED");
+        assertThat((String) wrong.get("errorMessage")).contains("does not match file type SCOPE_1_DIRECT");
+        assertThat(rowsForJob("esg_scope1_direct_emissions", (String) files.get(1).get("jobId"))).isZero();
+    }
+
+    @Test
+    void batchWithAnEmptyFileStoresNothing() {
+        int filesBefore = jdbcTemplate.queryForObject("SELECT COUNT(*) FROM mavhu.uploaded_files", Integer.class);
+        s3Objects.clear();
+
+        MultiValueMap<String, Object> body = batchBody("SCOPE_1_DIRECT", "scope1/Scope_1_Fleet_Fuel_2026-09.xlsx");
+        body.add("files", new org.springframework.core.io.ByteArrayResource(new byte[0]) {
+            @Override
+            public String getFilename() {
+                return "empty.xlsx";
+            }
+        });
+        ResponseEntity<Map> response = postBatch(body);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat((String) response.getBody().get("error")).isEqualTo("File must not be empty: empty.xlsx");
+        assertThat(s3Objects).isEmpty();
+        assertThat(jdbcTemplate.queryForObject("SELECT COUNT(*) FROM mavhu.uploaded_files", Integer.class))
+                .isEqualTo(filesBefore);
+    }
+
+    private ResponseEntity<Map> uploadBatch(String fileType, String... fileNames) {
+        return postBatch(batchBody(fileType, fileNames));
+    }
+
+    private MultiValueMap<String, Object> batchBody(String fileType, String... fileNames) {
+        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        for (String fileName : fileNames) {
+            body.add("files", new ClassPathResource("sample/" + fileName));
+        }
+        body.add("fileType", fileType);
+        body.add("userId", ids.uploaderId());
+        return body;
+    }
+
+    private ResponseEntity<Map> postBatch(MultiValueMap<String, Object> body) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        return restTemplate.postForEntity("/ingestion/v1/customers/{customerId}/files/batch",
+                new HttpEntity<>(body, headers), Map.class, ids.customerId());
+    }
+
     // --- approval workflow ---------------------------------------------------------------------
 
     @Test

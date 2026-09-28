@@ -40,6 +40,9 @@ management:
         include: health,info
 
 app:
+  upload:
+    # Most files accepted by POST /ingestion/v1/customers/{customerId}/files/batch
+    max-batch-files: ${MAX_BATCH_FILES:20}
   s3:
     bucket: ${S3_BUCKET:mavhu-data-ingestion-engine-service}
   processor:
