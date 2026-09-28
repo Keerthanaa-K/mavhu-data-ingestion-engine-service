@@ -5,7 +5,7 @@ Spring Boot service using Java 25, with AWS S3 + SQS integration dependencies an
 ## Features
 
 - Java 25 + Spring Boot
-- `GET /hi` endpoint returning `hi`
+- `GET /ingestion/v1/alive` liveness endpoint returning `alive`
 - AWS dependencies:
   - S3 (`spring-cloud-aws-starter-s3`)
   - SQS (`spring-cloud-aws-starter-sqs`)
@@ -31,13 +31,13 @@ SPRING_PROFILES_ACTIVE=local gradle bootRun
 Test:
 
 ```bash
-curl http://localhost:8080/hi
+curl http://localhost:8080/ingestion/v1/alive
 ```
 
 Expected response:
 
 ```text
-hi
+alive
 ```
 
 ## Environment Variables
@@ -92,12 +92,10 @@ docker run -d --name mavhu-data-ingestion-engine-service \
 Verify:
 
 ```bash
-curl http://<ec2-public-ip>:8080/hi
+curl http://<ec2-public-ip>:8080/ingestion/v1/alive
 ```
 
-## EC2 Deployment Notes
+## EC2 Deployment
 
-1. Launch EC2 with Docker installed and port `8080` allowed in security group inbound rules.
-2. Ensure EC2 network/security groups can reach your PostgreSQL RDS instance on port `5432`.
-3. Prefer assigning an IAM role to EC2 for S3/SQS access; if you do this, you can remove access key env vars.
-4. Pull source, build image, run container with environment variables shown above.
+See [docs/deploy-aws-ec2.md](docs/deploy-aws-ec2.md) for the full guide: S3, RDS, IAM role, EC2 setup,
+database DDL, Docker, nginx (frontend + API on one origin), HTTPS, redeploys and troubleshooting.

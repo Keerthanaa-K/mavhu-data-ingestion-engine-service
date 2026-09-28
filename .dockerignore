@@ -1,7 +1,9 @@
 target
 build
+out
 .gradle
 .git
 .idea
 .DS_Store
 *.iml
+insomnia
