@@ -161,10 +161,9 @@ starts. Run these from the EC2 instance (it can reach RDS; your laptop can't).
 
    psql -h $RDS -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion.sql
    psql -h $RDS -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion_grants.sql
-   psql -h $RDS -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_approval.sql
    ```
 
-   All three are idempotent, so re-running them is safe.
+   Both are idempotent, so re-running them is safe.
 3. **Mock data: dev/staging only, never production.**
 
    ```bash

@@ -1,20 +1,63 @@
--- DDL for ESG file ingestion (file processor).
+-- DDL for ESG file ingestion (file processor) and approval workflow.
 --
--- One table per supported file type (see com.mavhu.ingestion.processing.FileType) plus
--- mavhu.ingestion_jobs, which tracks every upload -> process run.
+-- One table per supported file type (see com.mavhu.ingestion.processing.FileType) plus:
+--   * mavhu.uploaded_files  — one row per uploaded file (who uploaded it, for which customer,
+--     where it is in S3) and its approval state
+--   * mavhu.ingestion_jobs  — every upload -> process run
+--
+-- approval_status on uploaded_files is the source of truth (PENDING / APPROVED / REJECTED);
+-- is_approved mirrors it as a boolean (true only when APPROVED), enforced by a CHECK constraint.
+-- ingestion_jobs.file_id and every ESG table's file_id reference uploaded_files. ESG tables also
+-- carry is_approved, updated when a manager approves or rejects the file.
 --
 -- Every ESG table carries the same lineage columns:
+--   file_id           -> mavhu.uploaded_files.file_id
 --   ingestion_job_id  -> mavhu.ingestion_jobs.job_id (which upload produced the row)
 --   customer_id       -> customer the file was uploaded for
 --   source_row_number -> 1-based row number in the uploaded sheet
+--   is_approved       -> mirrors uploaded_files (false until the file is APPROVED)
+--
+-- customer_id / uploaded_by_user_id / reviewed_by_user_id refer to mavhu.customers / mavhu.users.
+-- They are validated by the application rather than by foreign keys, because those tables are owned
+-- by postgres and mavhu_ingestion_service has no REFERENCES privilege on them.
 --
 -- Statements are idempotent (IF NOT EXISTS), so the file can be re-run safely.
--- Apply with:
---   psql -h <host> -U <user> -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion.sql
--- Types are kept portable across PostgreSQL and H2 (PostgreSQL mode) so tests run this same file.
+-- Types are portable across PostgreSQL and H2 (PostgreSQL mode) so tests run this same file.
+-- Apply tables with:
+--   psql -h <host> -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion.sql
+-- Then DML grants (PostgreSQL only; not run by H2 tests):
+--   psql -h <host> -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion_grants.sql
+
+CREATE TABLE IF NOT EXISTS mavhu.uploaded_files (
+    file_id             UUID                     PRIMARY KEY,
+    customer_id         INTEGER                  NOT NULL,
+    -- NULL only for files ingested before user attribution existed
+    uploaded_by_user_id INTEGER,
+    file_type           VARCHAR(64)              NOT NULL,
+    original_file_name  VARCHAR(512),
+    content_type        VARCHAR(255),
+    size_bytes          BIGINT,
+    s3_path             VARCHAR(1024)            NOT NULL,
+    approval_status     VARCHAR(16)              NOT NULL DEFAULT 'PENDING',
+    is_approved         BOOLEAN                  NOT NULL DEFAULT FALSE,
+    reviewed_by_user_id INTEGER,
+    reviewed_at         TIMESTAMP WITH TIME ZONE,
+    review_comment      TEXT,
+    uploaded_at         TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_uploaded_files_s3_path UNIQUE (s3_path),
+    CONSTRAINT ck_uploaded_files_approval_status CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED')),
+    CONSTRAINT ck_uploaded_files_is_approved CHECK (is_approved = (approval_status = 'APPROVED')),
+    CONSTRAINT ck_uploaded_files_review CHECK (
+        (approval_status = 'PENDING' AND reviewed_by_user_id IS NULL AND reviewed_at IS NULL)
+        OR (approval_status <> 'PENDING' AND reviewed_by_user_id IS NOT NULL AND reviewed_at IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_uploaded_files_customer_status
+    ON mavhu.uploaded_files (customer_id, approval_status, uploaded_at);
+CREATE INDEX IF NOT EXISTS idx_uploaded_files_uploaded_by ON mavhu.uploaded_files (uploaded_by_user_id);
 
 CREATE TABLE IF NOT EXISTS mavhu.ingestion_jobs (
     job_id             UUID                     PRIMARY KEY,
+    file_id            UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id        INTEGER                  NOT NULL,
     file_type          VARCHAR(64)              NOT NULL,
     s3_path            VARCHAR(1024)            NOT NULL,
@@ -26,6 +69,7 @@ CREATE TABLE IF NOT EXISTS mavhu.ingestion_jobs (
     started_at         TIMESTAMP WITH TIME ZONE,
     completed_at       TIMESTAMP WITH TIME ZONE
 );
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ingestion_jobs_file ON mavhu.ingestion_jobs (file_id);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_customer ON mavhu.ingestion_jobs (customer_id);
 CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_s3_path ON mavhu.ingestion_jobs (s3_path);
 
@@ -33,8 +77,10 @@ CREATE INDEX IF NOT EXISTS idx_ingestion_jobs_s3_path ON mavhu.ingestion_jobs (s
 CREATE TABLE IF NOT EXISTS mavhu.esg_entity_reference (
     id                    BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id      UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id               UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id           INTEGER                  NOT NULL,
     source_row_number     INTEGER                  NOT NULL,
+    is_approved           BOOLEAN                  NOT NULL DEFAULT FALSE,
     entity_code           VARCHAR(64),
     subsidiary            VARCHAR(255),
     business_segment      VARCHAR(255),
@@ -45,14 +91,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_entity_reference (
     ingested_at           TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_entity_reference_job ON mavhu.esg_entity_reference (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_entity_reference_file ON mavhu.esg_entity_reference (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_entity_reference_customer ON mavhu.esg_entity_reference (customer_id);
 
 -- 03_Scope_1_Direct -> SCOPE_1_DIRECT
 CREATE TABLE IF NOT EXISTS mavhu.esg_scope1_direct_emissions (
     id                              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                         UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                     INTEGER                  NOT NULL,
     source_row_number               INTEGER                  NOT NULL,
+    is_approved                     BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id                       VARCHAR(64),
     subsidiary                      VARCHAR(255),
     site                            VARCHAR(255),
@@ -68,14 +117,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_scope1_direct_emissions (
     ingested_at                     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_scope1_job ON mavhu.esg_scope1_direct_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_scope1_file ON mavhu.esg_scope1_direct_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_scope1_customer ON mavhu.esg_scope1_direct_emissions (customer_id);
 
 -- 04_Scope_2_Energy -> SCOPE_2_ENERGY
 CREATE TABLE IF NOT EXISTS mavhu.esg_scope2_energy_emissions (
     id                                         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                           UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                                    UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                                INTEGER                  NOT NULL,
     source_row_number                          INTEGER                  NOT NULL,
+    is_approved                                BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id                                  VARCHAR(64),
     subsidiary                                 VARCHAR(255),
     site                                       VARCHAR(255),
@@ -90,14 +142,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_scope2_energy_emissions (
     ingested_at                                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_scope2_job ON mavhu.esg_scope2_energy_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_scope2_file ON mavhu.esg_scope2_energy_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_scope2_customer ON mavhu.esg_scope2_energy_emissions (customer_id);
 
 -- 05_Scope_3_Operational -> SCOPE_3_OPERATIONAL
 CREATE TABLE IF NOT EXISTS mavhu.esg_scope3_operational_emissions (
     id                              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                         UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                     INTEGER                  NOT NULL,
     source_row_number               INTEGER                  NOT NULL,
+    is_approved                     BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id                       VARCHAR(64),
     subsidiary                      VARCHAR(255),
     category                        VARCHAR(64),
@@ -112,14 +167,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_scope3_operational_emissions (
     ingested_at                     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_scope3_job ON mavhu.esg_scope3_operational_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_scope3_file ON mavhu.esg_scope3_operational_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_scope3_customer ON mavhu.esg_scope3_operational_emissions (customer_id);
 
 -- 06_Financed_Emissions -> FINANCED_EMISSIONS (PCAF Part A)
 CREATE TABLE IF NOT EXISTS mavhu.esg_financed_emissions (
     id                             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id               UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                        UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                    INTEGER                  NOT NULL,
     source_row_number              INTEGER                  NOT NULL,
+    is_approved                    BOOLEAN                  NOT NULL DEFAULT FALSE,
     position_id                    VARCHAR(64),
     asset_class                    VARCHAR(255),
     subsidiary                     VARCHAR(255),
@@ -138,14 +196,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_financed_emissions (
     ingested_at                    TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_financed_job ON mavhu.esg_financed_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_financed_file ON mavhu.esg_financed_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_financed_customer ON mavhu.esg_financed_emissions (customer_id);
 
 -- 07_DQ_Portfolio_Summary -> DQ_PORTFOLIO_SUMMARY (the sheet's "TOTAL / Group" row is not ingested)
 CREATE TABLE IF NOT EXISTS mavhu.esg_dq_portfolio_summary (
     id                              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                         UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                     INTEGER                  NOT NULL,
     source_row_number               INTEGER                  NOT NULL,
+    is_approved                     BOOLEAN                  NOT NULL DEFAULT FALSE,
     asset_class                     VARCHAR(255),
     number_of_positions             INTEGER,
     total_outstanding_usd           NUMERIC(38, 18),
@@ -154,14 +215,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_dq_portfolio_summary (
     ingested_at                     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_dq_summary_job ON mavhu.esg_dq_portfolio_summary (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_dq_summary_file ON mavhu.esg_dq_portfolio_summary (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_dq_summary_customer ON mavhu.esg_dq_portfolio_summary (customer_id);
 
 -- 08_Insurance_Emissions -> INSURANCE_EMISSIONS (PCAF Part C)
 CREATE TABLE IF NOT EXISTS mavhu.esg_insurance_emissions (
     id                                   BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                     UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                              UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                          INTEGER                  NOT NULL,
     source_row_number                    INTEGER                  NOT NULL,
+    is_approved                          BOOLEAN                  NOT NULL DEFAULT FALSE,
     policy_id                            VARCHAR(64),
     segment                              VARCHAR(255),
     subsidiary                           VARCHAR(255),
@@ -178,14 +242,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_insurance_emissions (
     ingested_at                          TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_insurance_job ON mavhu.esg_insurance_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_insurance_file ON mavhu.esg_insurance_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_insurance_customer ON mavhu.esg_insurance_emissions (customer_id);
 
 -- 09_Facilitated_Emissions -> FACILITATED_EMISSIONS (PCAF Part B)
 CREATE TABLE IF NOT EXISTS mavhu.esg_facilitated_emissions (
     id                            BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id              UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                       UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                   INTEGER                  NOT NULL,
     source_row_number             INTEGER                  NOT NULL,
+    is_approved                   BOOLEAN                  NOT NULL DEFAULT FALSE,
     transaction_id                VARCHAR(64),
     issuer                        VARCHAR(512),
     listed_status                 VARCHAR(64),
@@ -203,14 +270,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_facilitated_emissions (
     ingested_at                   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_facilitated_job ON mavhu.esg_facilitated_emissions (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_facilitated_file ON mavhu.esg_facilitated_emissions (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_facilitated_customer ON mavhu.esg_facilitated_emissions (customer_id);
 
 -- 10_Satellite_Geospatial -> SATELLITE_GEOSPATIAL ("Approx. Coordinates" is also split into latitude/longitude)
 CREATE TABLE IF NOT EXISTS mavhu.esg_satellite_geospatial (
     id                      BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id        UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                 UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id             INTEGER                  NOT NULL,
     source_row_number       INTEGER                  NOT NULL,
+    is_approved             BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id               VARCHAR(64),
     linked_borrower_or_site VARCHAR(512),
     subsidiary_portfolio    VARCHAR(255),
@@ -230,14 +300,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_satellite_geospatial (
     ingested_at             TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_geospatial_job ON mavhu.esg_satellite_geospatial (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_geospatial_file ON mavhu.esg_satellite_geospatial (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_geospatial_customer ON mavhu.esg_satellite_geospatial (customer_id);
 
 -- 11_Social_Fin_Inclusion -> SOCIAL_FIN_INCLUSION (ratios stored as fractions, e.g. 0.61 = 61%)
 CREATE TABLE IF NOT EXISTS mavhu.esg_social_financial_inclusion (
     id                         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id           UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                    UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                INTEGER                  NOT NULL,
     source_row_number          INTEGER                  NOT NULL,
+    is_approved                BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id                  VARCHAR(64),
     subsidiary                 VARCHAR(255),
     programme_or_product       VARCHAR(255),
@@ -252,14 +325,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_social_financial_inclusion (
     ingested_at                TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_fin_inclusion_job ON mavhu.esg_social_financial_inclusion (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_fin_inclusion_file ON mavhu.esg_social_financial_inclusion (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_fin_inclusion_customer ON mavhu.esg_social_financial_inclusion (customer_id);
 
 -- 12_Social_Workforce -> SOCIAL_WORKFORCE (percentages stored as fractions)
 CREATE TABLE IF NOT EXISTS mavhu.esg_social_workforce (
     id                              BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id                UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                         UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                     INTEGER                  NOT NULL,
     source_row_number               INTEGER                  NOT NULL,
+    is_approved                     BOOLEAN                  NOT NULL DEFAULT FALSE,
     record_id                       VARCHAR(64),
     subsidiary                      VARCHAR(255),
     period                          VARCHAR(32),
@@ -273,14 +349,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_social_workforce (
     ingested_at                     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_workforce_job ON mavhu.esg_social_workforce (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_workforce_file ON mavhu.esg_social_workforce (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_workforce_customer ON mavhu.esg_social_workforce (customer_id);
 
 -- 13_Governance_Board -> GOVERNANCE_BOARD (percentages stored as fractions)
 CREATE TABLE IF NOT EXISTS mavhu.esg_governance_board (
     id                          BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id            UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id                     UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id                 INTEGER                  NOT NULL,
     source_row_number           INTEGER                  NOT NULL,
+    is_approved                 BOOLEAN                  NOT NULL DEFAULT FALSE,
     entity                      VARCHAR(255),
     board_size                  INTEGER,
     independent_directors_ratio NUMERIC(38, 18),
@@ -292,14 +371,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_governance_board (
     ingested_at                 TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_gov_board_job ON mavhu.esg_governance_board (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_gov_board_file ON mavhu.esg_governance_board (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_gov_board_customer ON mavhu.esg_governance_board (customer_id);
 
 -- 14_Governance_Incidents -> GOVERNANCE_INCIDENTS (closure_date is NULL while an incident is open)
 CREATE TABLE IF NOT EXISTS mavhu.esg_governance_incidents (
     id                BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id  UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id           UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id       INTEGER                  NOT NULL,
     source_row_number INTEGER                  NOT NULL,
+    is_approved       BOOLEAN                  NOT NULL DEFAULT FALSE,
     incident_id       VARCHAR(64),
     subsidiary        VARCHAR(255),
     date_reported     DATE,
@@ -313,14 +395,17 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_governance_incidents (
     ingested_at       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_gov_incidents_job ON mavhu.esg_governance_incidents (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_gov_incidents_file ON mavhu.esg_governance_incidents (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_gov_incidents_customer ON mavhu.esg_governance_incidents (customer_id);
 
 -- 15_Ingestion_Audit_Log -> INGESTION_AUDIT_LOG
 CREATE TABLE IF NOT EXISTS mavhu.esg_ingestion_audit_log (
     id                BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
     ingestion_job_id  UUID                     NOT NULL REFERENCES mavhu.ingestion_jobs (job_id),
+    file_id           UUID                     NOT NULL REFERENCES mavhu.uploaded_files (file_id),
     customer_id       INTEGER                  NOT NULL,
     source_row_number INTEGER                  NOT NULL,
+    is_approved       BOOLEAN                  NOT NULL DEFAULT FALSE,
     batch_id          VARCHAR(64),
     source_file_name  VARCHAR(512),
     ingestion_channel VARCHAR(255),
@@ -333,4 +418,5 @@ CREATE TABLE IF NOT EXISTS mavhu.esg_ingestion_audit_log (
     ingested_at       TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_esg_audit_log_job ON mavhu.esg_ingestion_audit_log (ingestion_job_id);
+CREATE INDEX IF NOT EXISTS idx_esg_audit_log_file ON mavhu.esg_ingestion_audit_log (file_id);
 CREATE INDEX IF NOT EXISTS idx_esg_audit_log_customer ON mavhu.esg_ingestion_audit_log (customer_id);
