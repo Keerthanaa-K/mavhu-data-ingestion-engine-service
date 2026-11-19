@@ -15,7 +15,7 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * JDBC access to mavhu.uploaded_files (DDL: db/ddl/esg_file_approval.sql).
+ * JDBC access to mavhu.uploaded_files (DDL: db/ddl/esg_file_ingestion.sql).
  */
 @Repository
 @RequiredArgsConstructor

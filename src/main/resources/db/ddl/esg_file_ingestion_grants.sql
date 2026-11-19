@@ -9,6 +9,7 @@
 --   psql -h <host> -U mavhu_ingestion_service -d mavhu_db -v ON_ERROR_STOP=1 -f src/main/resources/db/ddl/esg_file_ingestion_grants.sql
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE
+    mavhu.uploaded_files,
     mavhu.ingestion_jobs,
     mavhu.esg_entity_reference,
     mavhu.esg_scope1_direct_emissions,
